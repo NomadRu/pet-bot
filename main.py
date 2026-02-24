@@ -5,22 +5,24 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-TOKEN = os.getenv("BOT_TOKEN")  # ← будет брать из настроек Railway
+TOKEN = os.getenv("BOT_TOKEN")
 
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Хранилище в памяти (для теста)
+# Хранилище в памяти
 pairs = {}
 pets = {}
 
 @dp.message(CommandStart(deep_link=True))
-async def start_with_ref(message: Message, command: types.CommandObject):
+async def start_with_ref(message: Message):
     user_id = message.from_user.id
-    payload = command.args or ""
-    
+    # Получаем реферальный параметр
+    text = message.text
+    payload = text.split()[1] if len(text.split()) > 1 else ""
+
     if payload.startswith("ref_"):
         try:
             ref_id = int(payload[4:])
@@ -37,10 +39,12 @@ async def start_with_ref(message: Message, command: types.CommandObject):
             pairs[ref_id] = user_id
             pets[pair_key] = {'hunger': 80, 'happiness': 50, 'clean': 70}
             await message.answer(f"✅ Пара создана! Общий питомец 🦊\nГолод: 80%\nСчастье: 50%\nЧистота: 70%")
-            try: await bot.send_message(ref_id, "К тебе присоединились! Теперь общий питомец 🐾")
-            except: pass
+            try:
+                await bot.send_message(ref_id, "К тебе присоединились! Теперь общий питомец 🐾")
+            except:
+                pass
         else:
-            await message.answer("Пара уже есть!")
+            await message.answer("Пара уже создана!")
     else:
         await message.answer("Привет! Поделись ссылкой с девушкой ❤️")
 
