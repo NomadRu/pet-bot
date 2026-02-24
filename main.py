@@ -27,12 +27,9 @@ cur.execute('''CREATE TABLE IF NOT EXISTS pets (
     cleanliness INTEGER DEFAULT 70, 
     level INTEGER DEFAULT 1,
     daily_score INTEGER DEFAULT 0,
-    last_reset DATE DEFAULT CURRENT_DATE,
-    last_sad_message TIMESTAMP
+    last_reset DATE DEFAULT CURRENT_DATE
 )''')
 conn.commit()
-
-waiting_for_photo = {}  # если вдруг вернёшь фото позже
 
 def get_pair(user_id):
     cur.execute("SELECT pair_id, user1_id, user2_id FROM pairs WHERE user1_id=? OR user2_id=?", (user_id, user_id))
@@ -65,13 +62,12 @@ def progress_bar(value):
     filled = int(value / 10)
     return "█" * filled + "░" * (10 - filled)
 
-def get_zayka_face_and_mood(pet):
+def get_zayka_mood(pet):
     avg = (pet['hunger'] + pet['happiness'] + pet['cleanliness']) // 3
-    if avg < 30: return "🥺", "Зайка очень грустит и прячет ушки..."
-    if avg < 40: return "😔", "Зайка грустит и скучает по вам..."
-    if avg < 60: return "🐰", "Зайка спокойный"
-    if avg < 80: return "🥰", "Зайка счастлив!"
-    return "✨", "Зайка сияет от счастья и любви к вам 💕"
+    if avg < 40: return "🥺", "Зайка немного грустит..."
+    if avg < 70: return "🐰", "Зайка спокойный и милый"
+    if avg < 85: return "🥰", "Зайка очень счастлив!"
+    return "✨", "Зайка сияет от любви к вам 💕"
 
 def cute_reaction(action):
     reactions = {
@@ -79,7 +75,7 @@ def cute_reaction(action):
         "play": ["Зайка прыгает от радости! 🥰", "Так весело!"],
         "clean": ["Теперь Зайка пушистый и пахнет клубничкой ✨"],
         "pet": ["Муррр~ Зайка тает от ласки 🥹"],
-        "miss": ["Зайка тоже скучает по вам обоим 🥺💕"]
+        "miss": ["Зайка тоже скучает и прижимается к вам обоим 🥺💕"]
     }
     return random.choice(reactions.get(action, ["Зайка очень рад!"]))
 
@@ -96,48 +92,127 @@ def main_menu(name="Зайка"):
     ])
     return kb
 
-# Фоновая задача — грустные сообщения Зайки
-async def sad_zayka_task():
+# Фоновая задача — сброс daily_score в 00:00
+async def daily_reset_task():
     while True:
-        await asyncio.sleep(3600)  # каждые 60 минут
-        cur.execute("SELECT pair_id FROM pets")
-        for (pair_id,) in cur.fetchall():
-            pet = get_pet(pair_id)
-            if not pet: continue
-            avg = (pet['hunger'] + pet['happiness'] + pet['cleanliness']) // 3
-            if avg >= 40: continue
+        await asyncio.sleep(60)
+        today = date.today().isoformat()
+        cur.execute("UPDATE pets SET daily_score=0, last_reset=? WHERE last_reset != ?", (today, today))
+        conn.commit()
 
-            # проверяем, что не писали в последний час
-            cur.execute("SELECT last_sad_message FROM pets WHERE pair_id=?", (pair_id,))
-            last = cur.fetchone()[0]
-            if last and (datetime.now() - datetime.fromisoformat(last)).total_seconds() < 3600:
-                continue
+@dp.message(CommandStart())
+async def start(message: Message):
+    user_id = message.from_user.id
+    pair_id, other = get_pair(user_id)
 
-            emoji, mood = get_zayka_face_and_mood(pet)
-            sad_text = random.choice([
-                f"{emoji} Зайка грустит... Приходите скорее, мне одиноко 🥺",
-                f"{emoji} Зайка ждёт вас... Скучаю по вашим ручкам 💕",
-                f"{emoji} Зайка совсем грустный сегодня... Пожалуйста, поиграйте со мной 🥹"
-            ])
+    if pair_id:
+        reset_daily_if_needed(pair_id)
+        pet = get_pet(pair_id)
+        await message.answer(f"🐰 С возвращением к {pet['name']}!", reply_markup=main_menu(pet['name']))
+        return
 
-            pair_id, other = get_pair(0)  # костыль, чтобы получить обоих
-            # лучше получить user1 и user2
-            cur.execute("SELECT user1_id, user2_id FROM pairs WHERE pair_id=?", (pair_id,))
-            u1, u2 = cur.fetchone()
-            for uid in (u1, u2):
-                try:
-                    await bot.send_message(uid, sad_text)
-                except:
-                    pass
+    # ... (логика создания пары остаётся как раньше)
 
-            # обновляем время последнего грустного сообщения
-            cur.execute("UPDATE pets SET last_sad_message=CURRENT_TIMESTAMP WHERE pair_id=?", (pair_id,))
+    text = message.text or ""
+    if 'ref_' in text:
+        try:
+            ref_id = int(text.split('ref_')[1])
+            if ref_id == user_id: 
+                await message.answer("Это твоя ссылка 😉")
+                return
+            pair_id = f"{min(ref_id, user_id)}_{max(ref_id, user_id)}"
+            cur.execute("INSERT INTO pairs (pair_id, user1_id, user2_id) VALUES (?, ?, ?)", (pair_id, ref_id, user_id))
+            cur.execute("INSERT INTO pets (pair_id) VALUES (?)", (pair_id,))
             conn.commit()
+            await message.answer("✅ Общий Зайка создан! 🐰")
+            pet = get_pet(pair_id)
+            await message.answer("Выбери действие:", reply_markup=main_menu(pet['name']))
+        except:
+            await message.answer("Неверная ссылка 😔")
+    else:
+        bot_info = await bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Поделиться ссылкой", url=ref_link)]])
+        await message.answer(f"Привет! Чтобы ухаживать за одним Зайкой вдвоём — поделись этой ссылкой:\n\n{ref_link}", reply_markup=kb)
 
-# ... (остальной код start, do_action, info, rename, leave — тот же, что в прошлом сообщении, но с новым get_zayka_face_and_mood)
+@dp.callback_query(lambda c: c.data in ["feed", "play", "clean", "pet", "miss"])
+async def do_action(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    pair_id, other = get_pair(user_id)
+    reset_daily_if_needed(pair_id)
+    pet = get_pet(pair_id)
+    if not pet: return
+
+    if callback.data == "feed":
+        update_pet(pair_id, hunger=min(100, pet['hunger'] + 22))
+        action_text = "покормил"
+    elif callback.data == "play":
+        update_pet(pair_id, happiness=min(100, pet['happiness'] + 18))
+        action_text = "поиграл"
+    elif callback.data == "clean":
+        update_pet(pair_id, cleanliness=min(100, pet['cleanliness'] + 25))
+        action_text = "помыл"
+    elif callback.data == "pet":
+        update_pet(pair_id, happiness=min(100, pet['happiness'] + 25))
+        action_text = "погладил"
+    elif callback.data == "miss":
+        update_pet(pair_id, daily_score=pet['daily_score'] + 1)
+        action_text = "сказал, что скучает"
+        try:
+            await bot.send_message(other, f"❤️ {callback.from_user.first_name} скучает по тебе... 🥺\nПриходи скорее к нашему Зайке 💕")
+        except:
+            pass
+
+    pet = get_pet(pair_id)
+    emoji, mood = get_zayka_mood(pet)
+    reaction = cute_reaction(callback.data)
+
+    await callback.message.edit_text(
+        f"{emoji} {reaction}\n\n"
+        f"{pet['name']}\n"
+        f"Голод: {pet['hunger']}% {progress_bar(pet['hunger'])}\n"
+        f"Счастье: {pet['happiness']}% {progress_bar(pet['happiness'])}\n"
+        f"Чистота: {pet['cleanliness']}% {progress_bar(pet['cleanliness'])}",
+        reply_markup=main_menu(pet['name'])
+    )
+
+    if callback.data != "miss":
+        try:
+            await bot.send_message(other, f"❤️ Твой любимый человек {action_text} нашего {pet['name']}!\n{reaction}")
+        except:
+            pass
+
+@dp.callback_query(lambda c: c.data == "info")
+async def show_info(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    pair_id, other = get_pair(user_id)
+    if not pair_id: return
+    reset_daily_if_needed(pair_id)
+    pet = get_pet(pair_id)
+
+    try:
+        other_chat = await bot.get_chat(other)
+        partner = f"@{other_chat.username}" if other_chat.username else f"ID {other}"
+    except:
+        partner = f"ID {other}"
+
+    days = (datetime.now() - datetime.fromisoformat(cur.execute("SELECT created_at FROM pairs WHERE pair_id=?", (pair_id,)).fetchone()[0])).days
+
+    await callback.message.edit_text(
+        f"🐰 {pet['name']}\n\n"
+        f"Голод: {pet['hunger']}% {progress_bar(pet['hunger'])}\n"
+        f"Счастье: {pet['happiness']}% {progress_bar(pet['happiness'])}\n"
+        f"Чистота: {pet['cleanliness']}% {progress_bar(pet['cleanliness'])}\n\n"
+        f"Ты в паре с {partner} 💕\n"
+        f"Вместе уже {days} дней\n"
+        f"Сегодня вместе: {pet['daily_score']} раз ❤️",
+        reply_markup=main_menu(pet['name'])
+    )
+
+# rename, leave с подтверждением — остались как раньше
 
 async def main():
-    asyncio.create_task(sad_zayka_task())  # запускаем грустного Зайку
+    asyncio.create_task(daily_reset_task())  # запускаем авто-сброс
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
