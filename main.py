@@ -41,7 +41,6 @@ cur.execute('''CREATE TABLE IF NOT EXISTS pets (
 )''')
 conn.commit()
 
-
 # ====================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======================
 def get_pair(user_id):
     cur.execute("SELECT pair_id, user1_id, user2_id FROM pairs WHERE user1_id=? OR user2_id=?", (user_id, user_id))
@@ -51,7 +50,6 @@ def get_pair(user_id):
         other = u2 if u1 == user_id else u1
         return pair_id, other
     return None, None
-
 
 def get_pet(pair_id):
     cur.execute("SELECT name, hunger, happiness, cleanliness, level, xp, daily_score, last_decay FROM pets WHERE pair_id=?", (pair_id,))
@@ -63,12 +61,10 @@ def get_pet(pair_id):
         }
     return None
 
-
 def update_pet(pair_id, **kwargs):
     for field, value in kwargs.items():
         cur.execute(f"UPDATE pets SET {field}=? WHERE pair_id=?", (value, pair_id))
     conn.commit()
-
 
 def reset_daily_if_needed(pair_id):
     cur.execute("SELECT last_reset FROM pets WHERE pair_id=?", (pair_id,))
@@ -78,20 +74,31 @@ def reset_daily_if_needed(pair_id):
         cur.execute("UPDATE pets SET daily_score=0, last_reset=? WHERE pair_id=?", (today, pair_id))
         conn.commit()
 
-
 def progress_bar(value):
     filled = int(value / 10)
     return "█" * filled + "░" * (10 - filled)
 
+# ====================== КАРТИНКА ЗАЙКИ ПО НАСТРОЕНИЮ ======================
+def get_zayka_visual(pet):
+    avg = (pet['hunger'] + pet['happiness'] + pet['cleanliness']) // 3
+    if avg < 30:
+        return "💔🥺\n      🐰"          # очень грустный
+    elif avg < 50:
+        return "🥺🐰"                   # грустный
+    elif avg < 70:
+        return "🐰"                     # нормальный
+    elif avg < 85:
+        return "🥰🐰💕"                 # счастливый
+    else:
+        return "✨💖🐰💖✨"              # супер-счастливый
 
 def get_zayka_mood(pet):
     avg = (pet['hunger'] + pet['happiness'] + pet['cleanliness']) // 3
-    if avg < 30: return "🥺💔", "Зайка очень грустит... 😢"
+    if avg < 30: return "💔", "Зайка очень грустит... 😢"
     if avg < 50: return "🥺", "Зайка немного грустит..."
     if avg < 70: return "🐰", "Зайка спокойный и милый"
     if avg < 85: return "🥰", "Зайка очень счастлив!"
     return "✨", "Зайка сияет от любви к вам 💕"
-
 
 def cute_reaction(action):
     reactions = {
@@ -102,7 +109,6 @@ def cute_reaction(action):
         "miss": ["Зайка тоже скучает и прижимается к вам обоим 🥺💕"]
     }
     return random.choice(reactions.get(action, ["Зайка очень рад!"]))
-
 
 def main_menu(name="Зайка"):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -117,45 +123,25 @@ def main_menu(name="Зайка"):
     ])
     return kb
 
-
 # ====================== FSM ======================
 class RenameState(StatesGroup):
     waiting_name = State()
 
-
-# ====================== ФОНОВЫЕ ЗАДАЧИ ======================
+# ====================== ФОНОВАЯ ЗАДАЧА ======================
 async def decay_task():
     while True:
-        await asyncio.sleep(300)  # каждые 5 минут проверяем
+        await asyncio.sleep(300)  # каждые 5 минут
         now = datetime.now()
         cur.execute("SELECT pair_id, last_decay, hunger, happiness, cleanliness FROM pets")
-        pets = cur.fetchall()
-
-        for pair_id, last_decay_str, h, ha, c in pets:
-            last_decay = datetime.fromisoformat(last_decay_str)
-            minutes_passed = (now - last_decay).total_seconds() / 60
-
-            if minutes_passed >= 30:
-                hours = minutes_passed / 60
-
-                new_hunger = max(0, h - int(hours * 6))      # -6 за час голода
-                new_happiness = max(0, ha - int(hours * 4))  # -4 за час
-                new_clean = max(0, c - int(hours * 3.5))     # -3.5 за час
-
+        for pair_id, last_str, h, ha, c in cur.fetchall():
+            minutes = (now - datetime.fromisoformat(last_str)).total_seconds() / 60
+            if minutes >= 30:
+                hours = minutes / 60
                 update_pet(pair_id,
-                           hunger=new_hunger,
-                           happiness=new_happiness,
-                           cleanliness=new_clean,
+                           hunger=max(0, h - int(hours * 6)),
+                           happiness=max(0, ha - int(hours * 4)),
+                           cleanliness=max(0, c - int(hours * 3.5)),
                            last_decay=now.isoformat())
-
-                # уведомление, если совсем плохо
-                if (new_hunger + new_happiness + new_clean) / 3 < 25:
-                    pair_id, other = get_pair(list(cur.execute("SELECT user1_id FROM pairs WHERE pair_id=?", (pair_id,)).fetchone())[0])  # упрощённо
-                    try:
-                        await bot.send_message(other, f"🥺 Наш {get_pet(pair_id)['name']} очень грустит... Приходи скорее! 💔")
-                    except:
-                        pass
-
 
 # ====================== ХЭНДЛЕРЫ ======================
 @dp.message(CommandStart())
@@ -166,7 +152,9 @@ async def start(message: Message):
     if pair_id:
         reset_daily_if_needed(pair_id)
         pet = get_pet(pair_id)
-        await message.answer(f"🐰 С возвращением к {pet['name']} (уровень {pet['level']})!", reply_markup=main_menu(pet['name']))
+        visual = get_zayka_visual(pet)
+        await message.answer(f"{visual}\n\n🐰 С возвращением к {pet['name']} (уровень {pet['level']})!",
+                             reply_markup=main_menu(pet['name']))
         return
 
     text = message.text or ""
@@ -181,13 +169,13 @@ async def start(message: Message):
             cur.execute("INSERT OR IGNORE INTO pets (pair_id, last_decay) VALUES (?, ?)", (pair_id, datetime.now().isoformat()))
             conn.commit()
 
-            await message.answer("✅ Общий Зайка создан! 🐰 Теперь вы вместе за ним ухаживаете!")
+            await message.answer("✅ Общий Зайка создан! 🐰")
             pet = get_pet(pair_id)
-            await message.answer(f"Выбери действие для {pet['name']}:", reply_markup=main_menu(pet['name']))
+            visual = get_zayka_visual(pet)
+            await message.answer(f"{visual}\n\nВыбери действие:", reply_markup=main_menu(pet['name']))
 
-            # уведомление первому человеку
             try:
-                await bot.send_message(ref_id, f"❤️ {message.from_user.first_name} присоединился! У нас теперь общий Зайка! 🐰")
+                await bot.send_message(ref_id, f"❤️ {message.from_user.first_name} присоединился! У нас теперь общий Зайка 🐰")
             except:
                 pass
         except:
@@ -196,28 +184,25 @@ async def start(message: Message):
         bot_info = await bot.get_me()
         ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Поделиться ссылкой", url=ref_link)]])
-        await message.answer(
-            f"Привет! 💕\nЧтобы ухаживать за одним Зайкой вдвоём — поделись этой ссылкой со своим человеком:\n\n{ref_link}",
-            reply_markup=kb
-        )
+        await message.answer(f"Привет! 💕\nЧтобы завести общего Зайку — поделись ссылкой:\n\n{ref_link}", reply_markup=kb)
 
 
 @dp.callback_query(lambda c: c.data in ["feed", "play", "clean", "pet", "miss"])
 async def do_action(callback: CallbackQuery):
     user_id = callback.from_user.id
     pair_id, other = get_pair(user_id)
-    if not pair_id:
-        return
+    if not pair_id: return
 
     reset_daily_if_needed(pair_id)
     pet = get_pet(pair_id)
 
-    # Cooldown 8 сек
-    if (datetime.now() - datetime.fromisoformat(pet['last_decay'])).total_seconds() < 8:
-        await callback.answer("Подожди немного 🐰", show_alert=True)
+    # === ЗАДЕРЖКА 3 СЕКУНДЫ ===
+    if (datetime.now() - datetime.fromisoformat(pet['last_decay'])).total_seconds() < 3:
+        await callback.answer("🐰 Не так быстро! Подожди 3 секунды ❤️", show_alert=True)
         return
 
     xp_gain = 0
+    action_text = ""
     if callback.data == "feed":
         update_pet(pair_id, hunger=min(100, pet['hunger'] + 22))
         xp_gain = 15
@@ -243,22 +228,23 @@ async def do_action(callback: CallbackQuery):
         except:
             pass
 
-    # Добавляем опыт и проверяем левел-ап
+    # опыт и уровень
     new_xp = pet['xp'] + xp_gain
     new_level = pet['level']
     while new_xp >= 100:
         new_xp -= 100
         new_level += 1
-        # бонус при левел-апе
         update_pet(pair_id, hunger=min(100, pet['hunger'] + 10), happiness=min(100, pet['happiness'] + 10))
 
     update_pet(pair_id, xp=new_xp, level=new_level, last_decay=datetime.now().isoformat())
 
     pet = get_pet(pair_id)
     emoji, mood = get_zayka_mood(pet)
+    visual = get_zayka_visual(pet)
     reaction = cute_reaction(callback.data)
 
     await callback.message.edit_text(
+        f"{visual}\n\n"
         f"{emoji} {reaction}\n\n"
         f"🐰 {pet['name']} (уровень {pet['level']})\n"
         f"Голод: {pet['hunger']}% {progress_bar(pet['hunger'])}\n"
@@ -279,10 +265,10 @@ async def do_action(callback: CallbackQuery):
 async def show_info(callback: CallbackQuery):
     user_id = callback.from_user.id
     pair_id, other = get_pair(user_id)
-    if not pair_id:
-        return
+    if not pair_id: return
     reset_daily_if_needed(pair_id)
     pet = get_pet(pair_id)
+    visual = get_zayka_visual(pet)
 
     try:
         other_chat = await bot.get_chat(other)
@@ -295,6 +281,7 @@ async def show_info(callback: CallbackQuery):
     )).days
 
     await callback.message.edit_text(
+        f"{visual}\n\n"
         f"🐰 {pet['name']} (уровень {pet['level']})\n\n"
         f"Голод: {pet['hunger']}% {progress_bar(pet['hunger'])}\n"
         f"Счастье: {pet['happiness']}% {progress_bar(pet['happiness'])}\n"
@@ -307,14 +294,11 @@ async def show_info(callback: CallbackQuery):
     )
 
 
+# rename и leave (полностью рабочие)
 @dp.callback_query(lambda c: c.data == "rename")
 async def start_rename(callback: CallbackQuery, state: FSMContext):
     await state.set_state(RenameState.waiting_name)
-    await callback.message.edit_text(
-        "✏️ Введи новое имя для нашего Зайки (до 20 символов):",
-        reply_markup=None
-    )
-
+    await callback.message.edit_text("✏️ Введи новое имя для Зайки (макс 20 символов):", reply_markup=None)
 
 @dp.message(RenameState.waiting_name)
 async def process_new_name(message: Message, state: FSMContext):
@@ -322,19 +306,14 @@ async def process_new_name(message: Message, state: FSMContext):
     if len(name) < 2:
         await message.answer("Имя слишком короткое 😔 Попробуй ещё раз:")
         return
-
     user_id = message.from_user.id
     pair_id, _ = get_pair(user_id)
-    if not pair_id:
-        await state.clear()
-        return
-
-    update_pet(pair_id, name=name)
-    pet = get_pet(pair_id)
-
-    await message.answer(f"✅ Зайка теперь зовётся **{name}**! 🐰", reply_markup=main_menu(name))
+    if pair_id:
+        update_pet(pair_id, name=name)
+        pet = get_pet(pair_id)
+        visual = get_zayka_visual(pet)
+        await message.answer(f"{visual}\n\n✅ Теперь Зайка зовётся **{name}**! 🐰", reply_markup=main_menu(name))
     await state.clear()
-
 
 @dp.callback_query(lambda c: c.data == "leave")
 async def start_leave(callback: CallbackQuery):
@@ -342,42 +321,34 @@ async def start_leave(callback: CallbackQuery):
         [InlineKeyboardButton(text="Да, выйти ❌", callback_data="leave_confirm")],
         [InlineKeyboardButton(text="Нет, остаться ❤️", callback_data="cancel")]
     ])
-    await callback.message.edit_text(
-        "🚪 Ты точно хочешь выйти из пары?\nЗайка останется у второго человека.",
-        reply_markup=kb
-    )
-
+    await callback.message.edit_text("🚪 Ты точно хочешь выйти из пары?\nЗайка останется у второго человека.", reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data == "leave_confirm")
 async def confirm_leave(callback: CallbackQuery):
     user_id = callback.from_user.id
     pair_id, other = get_pair(user_id)
-    if not pair_id:
-        return
-
-    cur.execute("DELETE FROM pairs WHERE pair_id=?", (pair_id,))
-    cur.execute("DELETE FROM pets WHERE pair_id=?", (pair_id,))
-    conn.commit()
-
-    await callback.message.edit_text("😢 Ты вышел из пары. Зайка теперь только у второго человека.")
-    try:
-        await bot.send_message(other, "💔 Твой человек вышел из пары... Зайка теперь только твой.")
-    except:
-        pass
-
+    if pair_id:
+        cur.execute("DELETE FROM pairs WHERE pair_id=?", (pair_id,))
+        cur.execute("DELETE FROM pets WHERE pair_id=?", (pair_id,))
+        conn.commit()
+        await callback.message.edit_text("😢 Ты вышел из пары.")
+        try:
+            await bot.send_message(other, "💔 Твой человек вышел... Зайка теперь только твой.")
+        except:
+            pass
 
 @dp.callback_query(lambda c: c.data == "cancel")
 async def cancel_action(callback: CallbackQuery):
     pair_id, _ = get_pair(callback.from_user.id)
-    pet = get_pet(pair_id)
-    await callback.message.edit_text("Хорошо, остаёмся вместе! ❤️", reply_markup=main_menu(pet['name']))
-
+    if pair_id:
+        pet = get_pet(pair_id)
+        visual = get_zayka_visual(pet)
+        await callback.message.edit_text(f"{visual}\n\nХорошо, остаёмся вместе! ❤️", reply_markup=main_menu(pet['name']))
 
 # ====================== ЗАПУСК ======================
 async def main():
-    asyncio.create_task(decay_task())   # запуск decay
+    asyncio.create_task(decay_task())
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
